@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include <omp.h>
 
 // Use the PRIOS functions from the ST code.
 #include <PRIOS.h>
@@ -73,20 +74,32 @@ uint8_t check_decoded_payload(uint8_t *decoded_frame, uint32_t *total_consumptio
     return 1;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
 	uint32_t total_consumption; uint32_t last_month_total_consumption; uint8_t year; uint8_t month; uint8_t day;
     uint8_t found_keys = 0;
     uint8_t decoded_frame[11];
-    time_t prevtime = 0;
 
+    uint64_t local_count = 0ul;
+    uint64_t step_size = 1000000000ul;
+    uint64_t steps_done = 0ul;
+    uint64_t skip = 0ul;
+    
+    setbuf(stdout, NULL);
+    
+    //skips x initial tries (valued passed in hex)
+    if (argc > 1)
+    {
+        //sscanf(argv[1], "%I64x", &skip);
+        sscanf(argv[1], "%lx", &skip);
+        printf("Skipping first %.16lx possible keys\n", skip);
+        steps_done += skip;
+    }
+    
+    
     // Loop over all the possible keys:
-    for (uint64_t i=0; i<0xffffffffffffffff; i++) {
-        time_t curtime = time(NULL);
-        if (curtime > prevtime + 1) {
-            printf("%.16llx keys tried\n", i);
-            prevtime = curtime;
-        }
-
+    #pragma omp parallel for firstprivate(local_count)
+    //for (uint64_t i=skip; i<0xffffffffffffffff; i++) {
+        for (uint64_t i=skip; i<UINT64_MAX; i++) {
         // Test all frames in sequence until one fails:
         uint8_t success = 1;
         for (uint8_t j=0, count=sizeof(frames) / sizeof(frames[0]); j<count; j++) {
@@ -111,6 +124,31 @@ int main(void) {
 	        );
 	        found_keys++;
         }
+
+        if (++local_count % step_size == 0)
+        {
+            #pragma omp atomic
+            steps_done += step_size;
+            time_t now;
+            
+            time(&now);
+            struct tm *local = localtime(&now);
+            int hours = local->tm_hour;
+            int minutes = local->tm_min;
+            int seconds = local->tm_sec;
+            int day = local->tm_mday;
+            int month = local->tm_mon + 1;
+            int year = local->tm_year + 1900;
+            
+            //printf("[%d] local_count %.16ld\n", omp_get_thread_num(), local_count);
+            printf("[%d] [%d-%d-%d %d:%d:%d] Tried %ld keys (%.2f%%) [Processed from %.16lx to %.16lx]\n", 
+                omp_get_thread_num(), 
+                year, month, day, hours, minutes, seconds, 
+                steps_done, 
+                steps_done / UINT64_MAX * 100.0, 
+                i - local_count, i);
+        }
+
     }
 
     return found_keys > 0;
