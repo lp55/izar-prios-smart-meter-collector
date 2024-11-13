@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include <string.h>
 #include <omp.h>
 
 // Use the PRIOS functions from the ST code.
@@ -77,31 +78,48 @@ uint8_t check_decoded_payload(uint8_t *decoded_frame, uint32_t *total_consumptio
 int main(int argc, char **argv) {
 	uint32_t total_consumption; uint32_t last_month_total_consumption; uint8_t year; uint8_t month; uint8_t day;
     uint8_t found_keys = 0;
-    uint8_t decoded_frame[11];
 
-    uint64_t local_count = 0ul;
-    uint64_t step_size = 1000000000ul;
+    uint32_t local_count = 0u;
+    const uint64_t step_size = 300000000ul;
     uint64_t steps_done = 0ul;
-    uint64_t skip = 0ul;
     
     setbuf(stdout, NULL);
-    
-    //skips x initial tries (valued passed in hex)
-    if (argc > 1)
-    {
-        //sscanf(argv[1], "%I64x", &skip);
-        sscanf(argv[1], "%lx", &skip);
-        printf("Skipping first %.16lx possible keys\n", skip);
-        steps_done += skip;
+
+    for (uint8_t j=0, count=sizeof(frames) / sizeof(frames[0]); j<count; j++) {
+        for (uint8_t i=0; i<sizeof(frames[0]); i++) {
+            printf("%x", frames[j][i]);
+        }
+        printf("\n");
+    }
+ 
+    //swaps id and version (needed for arrow meters - https://github.com/wmbusmeters/wmbusmeters/issues/1416)
+    if (argc > 1) {
+        uint8_t block1[2];
+        for (uint8_t j=0, count=sizeof(frames) / sizeof(frames[0]); j<count; j++) {
+//Original:   19442434 8207 6261 9119 A2ED0E0013C5F135F91623B9CBC28C6A
+//Modificado: 19442434 6261 9119 8207 a2ed0e0013c5f135f91623B9cBc28c6a
+            memcpy(block1, &frames[j][4], 2);
+            memcpy(&frames[j][4], &frames[j][6], 2);
+            memcpy(&frames[j][6], &frames[j][8], 2);
+            memcpy(&frames[j][8], block1, 2);           
+        }
+        printf("Frames swapped\n");
+        for (uint8_t j=0, count=sizeof(frames) / sizeof(frames[0]); j<count; j++) {
+            for (uint8_t i=0; i<sizeof(frames[0]); i++) {
+                printf("%x", frames[j][i]);
+            }
+            printf("\n");
+        }
     }
     
     
     // Loop over all the possible keys:
     #pragma omp parallel for firstprivate(local_count)
-    //for (uint64_t i=skip; i<0xffffffffffffffff; i++) {
-        for (uint64_t i=skip; i<UINT64_MAX; i++) {
-        // Test all frames in sequence until one fails:
+    for (uint32_t z=0; z<UINT32_MAX; z++) {
+        uint64_t i = (uint64_t) 0xF8836DE6 << 32 | z;
+        uint8_t decoded_frame[11];
         uint8_t success = 1;
+        // Test all frames in sequence until one fails:
         for (uint8_t j=0, count=sizeof(frames) / sizeof(frames[0]); j<count; j++) {
 	        // Check if the payload can be decoded:
 	        if (!try_key((uint8_t *) &i, frames[j], decoded_frame)) {
@@ -118,38 +136,40 @@ int main(int argc, char **argv) {
 
         if (success) {
 	        printf(
-	        	"Candidate key: {0x%.2x, 0x%.2x, 0x%.2x, 0x%.2x, 0x%.2x, 0x%.2x, 0x%.2x, 0x%.2x}: First frame: current: %d, H0: %d H0 date: %.2d-%.2d-%.2d\n",
+	        	"Candidate key: %.2x%.2x%.2x%.2x%.2x%.2x%.2x%.2x (wmbusmeters format) %.2x%.2x%.2x%.2x%.2x%.2x%.2x%.2x0000000000000000 (esphome format): First frame: current: %d, H0: %d H0 date: %.2d-%.2d-%.2d\n",
+	        	(uint8_t)(i & 0xFF), (uint8_t)((i >> 8) & 0xFF), (uint8_t)((i >> 16) & 0xFF), (uint8_t)((i >> 24) & 0xFF), (uint8_t)((i >> 32) & 0xFF), (uint8_t)((i >> 40) & 0xFF), (uint8_t)((i >> 48) & 0xFF), (uint8_t)((i >> 56) & 0xFF),
 	        	(uint8_t)(i & 0xFF), (uint8_t)((i >> 8) & 0xFF), (uint8_t)((i >> 16) & 0xFF), (uint8_t)((i >> 24) & 0xFF), (uint8_t)((i >> 32) & 0xFF), (uint8_t)((i >> 40) & 0xFF), (uint8_t)((i >> 48) & 0xFF), (uint8_t)((i >> 56) & 0xFF),
 	        	total_consumption, last_month_total_consumption, year, month, day
 	        );
-	        found_keys++;
+            
+            #pragma omp atomic
+	        ++found_keys;
         }
 
-        if (++local_count % step_size == 0)
-        {
+        if (++local_count % step_size == 0) {
             #pragma omp atomic
             steps_done += step_size;
             time_t now;
             
             time(&now);
             struct tm *local = localtime(&now);
-            int hours = local->tm_hour;
-            int minutes = local->tm_min;
-            int seconds = local->tm_sec;
-            int day = local->tm_mday;
-            int month = local->tm_mon + 1;
-            int year = local->tm_year + 1900;
+            int dt_hours = local->tm_hour;
+            int dt_minutes = local->tm_min;
+            int dt_seconds = local->tm_sec;
+            int dt_day = local->tm_mday;
+            int dt_month = local->tm_mon + 1;
+            int dt_year = local->tm_year + 1900;
             
-            //printf("[%d] local_count %.16ld\n", omp_get_thread_num(), local_count);
-            printf("[%d] [%d-%d-%d %d:%d:%d] Tried %ld keys (%.2f%%) [Processed from %.16lx to %.16lx]\n", 
+            printf("[%d] [%d-%d-%d %d:%d:%d] Tried %ld keys (%.2f%%) [Processed from 0x%.8x to 0x%.8x]\n", 
                 omp_get_thread_num(), 
-                year, month, day, hours, minutes, seconds, 
+                dt_year, dt_month, dt_day, dt_hours, dt_minutes, dt_seconds, 
                 steps_done, 
-                steps_done / UINT64_MAX * 100.0, 
-                i - local_count, i);
+                steps_done / (float)UINT32_MAX * 100.0f, 
+                z - local_count + 1, z);
         }
-
     }
+
+    printf("found_keys: %d\n", found_keys);
 
     return found_keys > 0;
 }
